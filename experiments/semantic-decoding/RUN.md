@@ -1,36 +1,96 @@
-# Running the first benchmark
+# Running the semantic-decoding benchmark
 
-Build llama-server normally, prepare one deterministic prompt, then run the same request in isolated server processes.
+The benchmark deliberately separates performance measurement from detailed tracing.
 
-## Linux/macOS
+## 1. Build
+
+Build `llama-server` normally from the `research/semantic-decoding` branch.
+
+## 2. Performance matrix
+
+PowerShell example:
+
+    python .\experiments\semantic-decoding\tools\run_matrix.py `
+      --server ".\build\bin\Release\llama-server.exe" `
+      --model "O:\user files\Models\qwen.gguf" `
+      --prompt-file ".\prompt.txt" `
+      --threads 16 `
+      --repeats 3
+
+Linux/macOS example:
 
     python3 experiments/semantic-decoding/tools/run_matrix.py \
-      --base-cmd './build/bin/llama-server -m /models/qwen.gguf -t 16' \
+      --server ./build/bin/llama-server \
+      --model /models/qwen.gguf \
       --prompt-file ./prompt.txt \
-      --n-predict 512
+      --threads 16 \
+      --repeats 3
 
-## PowerShell
+Paths are passed directly to `subprocess`; shell quoting is not re-parsed by the runner.
 
-    python experiments/semantic-decoding/tools/run_matrix.py `
-      --base-cmd '.\\build\\bin\\Release\\llama-server.exe -m D:\\models\\qwen.gguf -t 16' `
-      --prompt-file .\\prompt.txt `
-      --n-predict 512
+Use repeated `--server-arg` options for additional single argv items, for example:
 
-The default matrix is baseline, ngram-mod, and suffix. Each mode starts a fresh server process, so startup-only speculative settings are isolated.
+    --server-arg=-ngl --server-arg=0
 
-Each mode writes server.log, response.json, output.txt when present, and speculative.ndjson. The root output directory contains summary.json.
+The default matrix is:
 
-## Trace sink
+- baseline;
+- ngram-mod;
+- suffix.
 
-Set IK_LLAMA_SPEC_TRACE to an NDJSON path before starting llama-server to enable per-round tracing. Without this variable, no trace file is written.
+The runner performs optional warmup processes first, then measured runs with tracing disabled. Mode order is rotated across repeats. `summary.json` reports median/min/max request latency and output hashes.
 
-Example on PowerShell:
+## 3. Optional traced pass
+
+Add:
+
+    --trace-pass
+
+This performs a separate diagnostic run per mode with `IK_LLAMA_SPEC_TRACE` enabled. Trace I/O is therefore excluded from the measured performance runs.
+
+The trace is NDJSON: one independently parseable event per line. A killed process may leave a truncated final line; the summarizer ignores only that final malformed line.
+
+## 4. Standalone trace sink
+
+PowerShell:
 
     $env:IK_LLAMA_SPEC_TRACE = "spec.ndjson"
-    .\\build\\bin\\Release\\llama-server.exe ...
+    .\build\bin\Release\llama-server.exe ...
 
-Each speculative record contains proposer, proposed_tokens, accepted_tokens, rejected_at, verification_us, seq_id, n_past, used_speculative, and failed.
+Without `IK_LLAMA_SPEC_TRACE`, no trace file is written.
+
+Each event can report:
+
+- outcome;
+- proposer;
+- proposed_tokens;
+- accepted_tokens;
+- rejected_at (null when there was no rejection);
+- verification_total_us;
+- seq_id;
+- n_past;
+- used_speculative;
+- failed.
+
+Summarize a trace with:
+
+    python .\experiments\semantic-decoding\tools\summarize_trace.py spec.ndjson --pretty
+
+## 5. Self-tests
+
+    python .\experiments\semantic-decoding\tools\test_trace_tools.py
+
+These tests require no model.
 
 ## Interpretation
 
-Compare request wall time, server timing fields, proposed/accepted token counts, acceptance rate, verification time, and output quality. Do not treat a faster failed task as an optimization win; task-level pass/fail evaluation is the next milestone.
+For lossless speculative modes, compare:
+
+- median request wall time;
+- output_equal_to_baseline;
+- proposal coverage;
+- acceptance rate;
+- accepted tokens per verified round;
+- verification total time.
+
+A faster run is not an optimization win if its output/task quality differs unexpectedly. Exact output hashes are a strong sanity check for greedy lossless experiments, but later task-level tests remain the authority for coding-agent quality.
