@@ -1,65 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ik-llama.local/semantic-decoding/trace.schema.json",
-  "title": "Semantic Decoding Trace",
+  "$id": "https://ik-llama.local/semantic-decoding/trace-record.schema.json",
+  "title": "Semantic Decoding NDJSON Record",
+  "description": "Schema for one line of IK_LLAMA_SPEC_TRACE NDJSON output.",
   "type": "object",
-  "required": ["schema_version", "run", "events", "summary"],
+  "required": [
+    "schema_version",
+    "type",
+    "outcome",
+    "seq_id",
+    "n_past",
+    "proposer",
+    "proposed_tokens",
+    "accepted_tokens",
+    "rejected_at",
+    "verification_total_us",
+    "used_speculative",
+    "failed"
+  ],
   "properties": {
     "schema_version": { "const": 1 },
-    "run": {
-      "type": "object",
-      "required": ["task_id", "mode"],
-      "properties": {
-        "task_id": { "type": "string" },
-        "mode": { "type": "string" },
-        "git_commit": { "type": ["string", "null"] },
-        "model": { "type": ["string", "null"] },
-        "quantization": { "type": ["string", "null"] },
-        "seed": { "type": ["integer", "null"] },
-        "host": { "type": ["string", "null"] },
-        "config": { "type": "object" }
-      },
-      "additionalProperties": true
+    "type": { "const": "speculation" },
+    "outcome": {
+      "enum": [
+        "attempt",
+        "no_proposal",
+        "below_min_draft",
+        "checkpoint_unavailable",
+        "proposal_invalid",
+        "verify_failed",
+        "sampling_failed",
+        "partial_accept",
+        "full_accept"
+      ]
     },
-    "events": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["type", "ts_ms"],
-        "properties": {
-          "type": {
-            "enum": [
-              "target_eval",
-              "speculation",
-              "tool",
-              "reasoning",
-              "action",
-              "quality"
-            ]
-          },
-          "ts_ms": { "type": "number", "minimum": 0 },
-          "proposer": { "type": ["string", "null"] },
-          "proposed_tokens": { "type": ["integer", "null"], "minimum": 0 },
-          "accepted_tokens": { "type": ["integer", "null"], "minimum": 0 },
-          "rejected_at": { "type": ["integer", "null"], "minimum": 0 },
-          "duration_ms": { "type": ["number", "null"], "minimum": 0 },
-          "target_tokens": { "type": ["integer", "null"], "minimum": 0 },
-          "details": { "type": "object" }
-        },
-        "additionalProperties": true
-      }
+    "seq_id": { "type": "integer" },
+    "n_past": { "type": "integer", "minimum": 0 },
+    "proposer": { "type": "string" },
+    "proposed_tokens": { "type": "integer", "minimum": 0 },
+    "accepted_tokens": { "type": "integer", "minimum": 0 },
+    "rejected_at": {
+      "type": ["integer", "null"],
+      "minimum": 0
     },
-    "summary": {
-      "type": "object",
-      "required": ["result"],
-      "properties": {
-        "result": { "enum": ["pass", "fail", "indeterminate"] },
-        "wall_time_ms": { "type": ["number", "null"], "minimum": 0 },
-        "generated_tokens": { "type": ["integer", "null"], "minimum": 0 },
-        "target_eval_count": { "type": ["integer", "null"], "minimum": 0 }
-      },
-      "additionalProperties": true
-    }
+    "verification_total_us": { "type": "integer", "minimum": 0 },
+    "used_speculative": { "type": "boolean" },
+    "failed": { "type": "boolean" }
   },
   "additionalProperties": true
 }
