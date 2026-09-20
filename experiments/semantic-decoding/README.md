@@ -78,6 +78,7 @@ This directory intentionally starts outside the core decode path. Engine changes
 - [HYPOTHESES.md](HYPOTHESES.md) — falsifiable research hypotheses.
 - [CODE_MAP.md](CODE_MAP.md) — existing ik_llama speculative hooks reused by the project.
 - [ROADMAP.md](ROADMAP.md) — milestones from observability through model-level experiments.
+- [RESULTS_TEMPLATE.md](RESULTS_TEMPLATE.md) — reproducible record for real CPU benchmark results.
 
 ## Current status
 
