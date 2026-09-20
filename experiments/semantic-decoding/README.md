@@ -66,3 +66,19 @@ experiments/semantic-decoding/
 ```
 
 This directory intentionally starts outside the core decode path. Engine changes should be small, measurable, and introduced only when required by an experiment.
+
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system boundaries, invariants, and extension points.
+- [TRACE_FORMAT.md](TRACE_FORMAT.md) — canonical NDJSON runtime trace contract.
+- [METRICS.md](METRICS.md) — measurement definitions and benchmark methodology.
+- [RUN.md](RUN.md) — build, preflight, benchmark, and trace workflow.
+- [DEVELOPING.md](DEVELOPING.md) — rules for adding instrumentation and proposers.
+- [HYPOTHESES.md](HYPOTHESES.md) — falsifiable research hypotheses.
+- [CODE_MAP.md](CODE_MAP.md) — existing ik_llama speculative hooks reused by the project.
+- [ROADMAP.md](ROADMAP.md) — milestones from observability through model-level experiments.
+
+## Current status
+
+M1 implementation is complete in the research branch, but local Windows/MSVC build and real-model runtime validation are still required before benchmark results should be trusted.
