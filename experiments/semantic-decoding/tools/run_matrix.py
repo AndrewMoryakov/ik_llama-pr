@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Run a small speculative-decoding benchmark matrix against llama-server."""
+"""Benchmark speculative modes without contaminating timing with trace I/O."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import shlex
+import statistics
 import subprocess
 import sys
 import time
@@ -15,8 +16,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from summarize_trace import summarize_file
 
-DEFAULT_MODES = {
+
+DEFAULT_MODES: dict[str, list[str]] = {
     "baseline": [],
     "ngram-mod": [
         "--spec-type",
@@ -29,7 +32,7 @@ DEFAULT_MODES = {
 }
 
 
-def request_json(url: str, payload: dict[str, Any] | None = None, timeout: float = 5.0) -> Any:
+def request_json(url: str, payload: dict[str, Any] | None, timeout: float) -> Any:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -42,64 +45,42 @@ def request_json(url: str, payload: dict[str, Any] | None = None, timeout: float
         return json.loads(body) if body else {}
 
 
-def wait_for_server(base_url: str, proc: subprocess.Popen[str], timeout_s: float) -> None:
-    deadline = time.monotonic() + timeout_s
+def wait_for_server(base_url: str, proc: subprocess.Popen[str], timeout_s: float) -> float:
+    started = time.monotonic()
+    deadline = started + timeout_s
     last_error: Exception | None = None
+
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"server exited early with code {proc.returncode}")
         try:
-            request_json(f"{base_url}/health", timeout=1.0)
-            return
+            request_json(f"{base_url}/health", None, 1.0)
+            return time.monotonic() - started
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             last_error = exc
             time.sleep(0.25)
-    raise TimeoutError(f"server did not become healthy within {timeout_s}s: {last_error}")
+
+    raise TimeoutError(
+        f"server did not become healthy within {timeout_s}s: {last_error}"
+    )
 
 
-def load_trace(path: Path) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
+def output_text(response: Any) -> str:
+    if not isinstance(response, dict):
+        return ""
+    content = response.get("content")
+    return content if isinstance(content, str) else ""
 
-    proposed = sum(int(row.get("proposed_tokens") or 0) for row in rows)
-    accepted = sum(int(row.get("accepted_tokens") or 0) for row in rows)
-    verify_us = sum(int(row.get("verification_us") or 0) for row in rows)
 
-    by_proposer: dict[str, dict[str, int | float]] = {}
-    for row in rows:
-        name = str(row.get("proposer") or "unknown")
-        item = by_proposer.setdefault(
-            name,
-            {"rounds": 0, "proposed_tokens": 0, "accepted_tokens": 0, "verification_us": 0},
-        )
-        item["rounds"] = int(item["rounds"]) + 1
-        item["proposed_tokens"] = int(item["proposed_tokens"]) + int(row.get("proposed_tokens") or 0)
-        item["accepted_tokens"] = int(item["accepted_tokens"]) + int(row.get("accepted_tokens") or 0)
-        item["verification_us"] = int(item["verification_us"]) + int(row.get("verification_us") or 0)
-
-    for item in by_proposer.values():
-        p = int(item["proposed_tokens"])
-        item["acceptance_rate"] = (int(item["accepted_tokens"]) / p) if p else 0.0
-
-    return {
-        "rounds": len(rows),
-        "proposed_tokens": proposed,
-        "accepted_tokens": accepted,
-        "acceptance_rate": accepted / proposed if proposed else 0.0,
-        "verification_ms": verify_us / 1000.0,
-        "by_proposer": by_proposer,
-    }
+def output_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def extract_server_metrics(response: Any) -> dict[str, Any]:
     if not isinstance(response, dict):
         return {}
 
-    out: dict[str, Any] = {}
-    for key in (
+    keys = (
         "tokens_predicted",
         "tokens_evaluated",
         "generation_settings",
@@ -107,41 +88,80 @@ def extract_server_metrics(response: Any) -> dict[str, Any]:
         "stop",
         "stopped_eos",
         "stopped_limit",
-    ):
-        if key in response:
-            out[key] = response[key]
-    return out
+    )
+    return {key: response[key] for key in keys if key in response}
 
 
-def run_mode(
-    name: str,
+def git_commit() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def build_base_command(args: argparse.Namespace) -> list[str]:
+    command = [str(args.server), "-m", str(args.model)]
+    if args.threads is not None:
+        command.extend(["-t", str(args.threads)])
+    if args.ctx_size is not None:
+        command.extend(["-c", str(args.ctx_size)])
+    for item in args.server_arg:
+        command.append(item)
+    return command
+
+
+def completion_payload(prompt: str, n_predict: int) -> dict[str, Any]:
+    return {
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "temperature": 0,
+        "stream": False,
+    }
+
+
+def run_once(
+    *,
+    label: str,
+    mode: str,
     mode_args: list[str],
-    base_cmd: list[str],
+    base_command: list[str],
     prompt: str,
     n_predict: int,
     port: int,
     startup_timeout: float,
+    request_timeout: float,
     output_dir: Path,
+    trace: bool,
 ) -> dict[str, Any]:
-    mode_dir = output_dir / name
-    mode_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = mode_dir / "speculative.ndjson"
-    log_path = mode_dir / "server.log"
+    run_dir = output_dir / label / mode
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    trace_path = run_dir / "speculative.ndjson"
+    log_path = run_dir / "server.log"
+    response_path = run_dir / "response.json"
+    output_path = run_dir / "output.txt"
 
     if trace_path.exists():
         trace_path.unlink()
 
-    cmd = [*base_cmd, "--port", str(port), *mode_args]
+    command = [*base_command, "--port", str(port), *mode_args]
     env = os.environ.copy()
-    env["IK_LLAMA_SPEC_TRACE"] = str(trace_path.resolve())
+    if trace:
+        env["IK_LLAMA_SPEC_TRACE"] = str(trace_path.resolve())
+    else:
+        env.pop("IK_LLAMA_SPEC_TRACE", None)
 
-    started = time.monotonic()
     response: Any = {}
-    request_wall_s = 0.0
+    startup_s = 0.0
+    request_s = 0.0
 
     with log_path.open("w", encoding="utf-8") as log:
         proc = subprocess.Popen(
-            cmd,
+            command,
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True,
@@ -149,19 +169,15 @@ def run_mode(
         )
         try:
             base_url = f"http://127.0.0.1:{port}"
-            wait_for_server(base_url, proc, startup_timeout)
-            request_started = time.monotonic()
+            startup_s = wait_for_server(base_url, proc, startup_timeout)
+
+            started = time.monotonic()
             response = request_json(
                 f"{base_url}/completion",
-                {
-                    "prompt": prompt,
-                    "n_predict": n_predict,
-                    "temperature": 0,
-                    "stream": False,
-                },
-                timeout=max(60.0, startup_timeout),
+                completion_payload(prompt, n_predict),
+                request_timeout,
             )
-            request_wall_s = time.monotonic() - request_started
+            request_s = time.monotonic() - started
         finally:
             proc.terminate()
             try:
@@ -170,33 +186,100 @@ def run_mode(
                 proc.kill()
                 proc.wait(timeout=5)
 
-    (mode_dir / "response.json").write_text(
+    response_path.write_text(
         json.dumps(response, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    content = response.get("content") if isinstance(response, dict) else None
-    if isinstance(content, str):
-        (mode_dir / "output.txt").write_text(content, encoding="utf-8")
+    text = output_text(response)
+    output_path.write_text(text, encoding="utf-8")
 
-    return {
-        "mode": name,
-        "command": cmd,
-        "startup_plus_request_s": time.monotonic() - started,
-        "request_wall_s": request_wall_s,
+    result: dict[str, Any] = {
+        "mode": mode,
+        "trace_enabled": trace,
+        "command": command,
+        "startup_s": startup_s,
+        "request_s": request_s,
+        "output_sha256": output_hash(text),
+        "output_chars": len(text),
         "server": extract_server_metrics(response),
-        "speculation": load_trace(trace_path),
     }
+
+    if trace:
+        result["trace"] = summarize_file(trace_path) if trace_path.exists() else {}
+
+    return result
+
+
+def rotated_orders(modes: list[str], repeats: int) -> list[list[str]]:
+    if not modes:
+        return []
+    return [
+        modes[(index % len(modes)) :] + modes[: (index % len(modes))]
+        for index in range(repeats)
+    ]
+
+
+def aggregate_performance(
+    results: list[dict[str, Any]],
+    modes: list[str],
+) -> dict[str, Any]:
+    baseline_hashes = [
+        row["output_sha256"] for row in results if row["mode"] == "baseline"
+    ]
+    canonical_hash = baseline_hashes[0] if baseline_hashes else None
+
+    aggregate: dict[str, Any] = {}
+    for mode in modes:
+        rows = [row for row in results if row["mode"] == mode]
+        request_values = [float(row["request_s"]) for row in rows]
+        startup_values = [float(row["startup_s"]) for row in rows]
+        hashes = [row["output_sha256"] for row in rows]
+
+        aggregate[mode] = {
+            "runs": len(rows),
+            "request_s_median": statistics.median(request_values)
+            if request_values
+            else None,
+            "request_s_min": min(request_values) if request_values else None,
+            "request_s_max": max(request_values) if request_values else None,
+            "startup_s_median": statistics.median(startup_values)
+            if startup_values
+            else None,
+            "output_hashes": sorted(set(hashes)),
+            "output_equal_to_baseline": (
+                canonical_hash is not None and all(h == canonical_hash for h in hashes)
+            ),
+        }
+
+    return aggregate
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-cmd", required=True)
+    parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--prompt-file", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("semantic-decoding-results"))
+    parser.add_argument("--threads", type=int)
+    parser.add_argument("--ctx-size", type=int)
+    parser.add_argument(
+        "--server-arg",
+        action="append",
+        default=[],
+        help="Append one raw llama-server argv item. Repeat as needed.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("semantic-decoding-results"),
+    )
     parser.add_argument("--n-predict", type=int, default=512)
     parser.add_argument("--port", type=int, default=18080)
-    parser.add_argument("--startup-timeout", type=float, default=120.0)
+    parser.add_argument("--startup-timeout", type=float, default=180.0)
+    parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--trace-pass", action="store_true")
     parser.add_argument(
         "--modes",
         nargs="+",
@@ -205,33 +288,91 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    base_cmd = shlex.split(args.base_cmd, posix=os.name != "nt")
-    if not base_cmd:
-        parser.error("--base-cmd produced an empty command")
+    if args.repeats < 1:
+        parser.error("--repeats must be >= 1")
+    if args.warmups < 0:
+        parser.error("--warmups must be >= 0")
 
     prompt = args.prompt_file.read_text(encoding="utf-8")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    base_command = build_base_command(args)
+    modes = list(args.modes)
 
-    results = []
-    for index, name in enumerate(args.modes):
-        result = run_mode(
-            name=name,
-            mode_args=DEFAULT_MODES[name],
-            base_cmd=base_cmd,
-            prompt=prompt,
-            n_predict=args.n_predict,
-            port=args.port + index,
-            startup_timeout=args.startup_timeout,
-            output_dir=args.output_dir,
-        )
-        results.append(result)
-        print(json.dumps(result, ensure_ascii=False))
+    warmup_results: list[dict[str, Any]] = []
+    for warmup_index in range(args.warmups):
+        for mode_index, mode in enumerate(modes):
+            warmup_results.append(
+                run_once(
+                    label=f"warmup-{warmup_index + 1:02d}",
+                    mode=mode,
+                    mode_args=DEFAULT_MODES[mode],
+                    base_command=base_command,
+                    prompt=prompt,
+                    n_predict=args.n_predict,
+                    port=args.port + mode_index,
+                    startup_timeout=args.startup_timeout,
+                    request_timeout=args.request_timeout,
+                    output_dir=args.output_dir,
+                    trace=False,
+                )
+            )
+
+    performance_results: list[dict[str, Any]] = []
+    for repeat_index, order in enumerate(rotated_orders(modes, args.repeats)):
+        for order_index, mode in enumerate(order):
+            result = run_once(
+                label=f"performance-{repeat_index + 1:02d}",
+                mode=mode,
+                mode_args=DEFAULT_MODES[mode],
+                base_command=base_command,
+                prompt=prompt,
+                n_predict=args.n_predict,
+                port=args.port + order_index,
+                startup_timeout=args.startup_timeout,
+                request_timeout=args.request_timeout,
+                output_dir=args.output_dir,
+                trace=False,
+            )
+            performance_results.append(result)
+            print(json.dumps(result, ensure_ascii=False))
+
+    trace_results: list[dict[str, Any]] = []
+    if args.trace_pass:
+        for mode_index, mode in enumerate(modes):
+            result = run_once(
+                label="trace",
+                mode=mode,
+                mode_args=DEFAULT_MODES[mode],
+                base_command=base_command,
+                prompt=prompt,
+                n_predict=args.n_predict,
+                port=args.port + mode_index,
+                startup_timeout=args.startup_timeout,
+                request_timeout=args.request_timeout,
+                output_dir=args.output_dir,
+                trace=True,
+            )
+            trace_results.append(result)
 
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "git_commit": git_commit(),
+        "server": str(args.server),
+        "model": str(args.model),
         "prompt_file": str(args.prompt_file),
-        "results": results,
+        "threads": args.threads,
+        "ctx_size": args.ctx_size,
+        "n_predict": args.n_predict,
+        "repeats": args.repeats,
+        "warmups": args.warmups,
+        "modes": modes,
+        "performance": {
+            "runs": performance_results,
+            "aggregate": aggregate_performance(performance_results, modes),
+        },
+        "trace": trace_results,
     }
+
     summary_path = args.output_dir / "summary.json"
     summary_path.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
