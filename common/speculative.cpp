@@ -3425,16 +3425,24 @@ static void common_speculative_trace_round(
     std::fprintf(
         fp,
         "{\"schema_version\":1,\"type\":\"speculation\","
-        "\"seq_id\":%d,\"n_past\":%d,\"proposer\":\"%s\","
-        "\"proposed_tokens\":%d,\"accepted_tokens\":%d,"
-        "\"rejected_at\":%d,\"verification_us\":%lld,"
-        "\"used_speculative\":%s,\"failed\":%s}\n",
+        "\"outcome\":\"%s\",\"seq_id\":%d,\"n_past\":%d,"
+        "\"proposer\":\"%s\",\"proposed_tokens\":%d,"
+        "\"accepted_tokens\":%d,\"rejected_at\":",
+        result.outcome.c_str(),
         (int) seq_id,
         (int) n_past,
         proposer.c_str(),
         result.proposed_tokens,
-        result.accepted_tokens,
-        result.rejected_at,
+        result.accepted_tokens);
+    if (result.rejected_at >= 0) {
+        std::fprintf(fp, "%d", result.rejected_at);
+    } else {
+        std::fputs("null", fp);
+    }
+    std::fprintf(
+        fp,
+        ",\"verification_total_us\":%lld,"
+        "\"used_speculative\":%s,\"failed\":%s}\n",
         (long long) result.verification_us,
         result.used_speculative ? "true" : "false",
         result.failed ? "true" : "false");
@@ -3496,6 +3504,7 @@ common_speculative_round_result common_speculative_run_round(
     }
 
     result.attempted = true;
+    result.outcome = "attempt";
     result.sampled_before_from_carry = have_carry;
     if (have_carry) {
         result.sampled_before = carry_token;
@@ -3520,12 +3529,16 @@ common_speculative_round_result common_speculative_run_round(
     result.proposed_tokens = (int32_t) draft.size();
     const int min_usable_draft = params.get_min_usable_stage_n_min();
     if ((int) draft.size() < min_usable_draft || (draft.empty() && !draft_result.target_only)) {
+        result.outcome = draft.empty() ? "no_proposal" : "below_min_draft";
+        common_speculative_trace_round(result, seq_id, n_past);
         return result;
     }
 
     if (!proposal_dists.empty() && proposal_dists.size() != draft.size()) {
         result.failed = true;
+        result.outcome = "proposal_invalid";
         result.error = "DFlash2 proposal distribution count does not match draft";
+        common_speculative_trace_round(result, seq_id, n_past);
         return result;
     }
 
@@ -3546,6 +3559,9 @@ common_speculative_round_result common_speculative_run_round(
     }
 
     if (draft.empty() && !draft_result.target_only) {
+        result.proposed_tokens = 0;
+        result.outcome = "checkpoint_unavailable";
+        common_speculative_trace_round(result, seq_id, n_past);
         return result;
     }
 
@@ -3565,6 +3581,7 @@ common_speculative_round_result common_speculative_run_round(
         result.verification_us = ggml_time_us() - verification_start_us;
         llama_batch_free(verify_batch);
         result.failed = true;
+        result.outcome = "verify_failed";
         result.error = "speculative verify decode failed";
         common_speculative_trace_round(result, seq_id, n_past);
         return result;
@@ -3578,6 +3595,7 @@ common_speculative_round_result common_speculative_run_round(
         result.verification_us = ggml_time_us() - verification_start_us;
         llama_batch_free(verify_batch);
         result.failed = true;
+        result.outcome = "sampling_failed";
         result.error = e.what();
         common_speculative_trace_round(result, seq_id, n_past);
         return result;
@@ -3586,6 +3604,9 @@ common_speculative_round_result common_speculative_run_round(
     result.accepted_tokens = std::max<int32_t>(0, (int32_t) ids.size() - 1);
     if (result.accepted_tokens < result.proposed_tokens) {
         result.rejected_at = result.accepted_tokens;
+        result.outcome = "partial_accept";
+    } else {
+        result.outcome = "full_accept";
     }
 
     std::vector<int32_t> accepted_output_indices;
