@@ -293,8 +293,9 @@ struct common_speculative_round_result {
     common_speculative_type proposer = COMMON_SPECULATIVE_TYPE_NONE;
     int32_t proposed_tokens = 0;
     int32_t accepted_tokens = 0;
-    int32_t rejected_at = -1; // zero-based draft position, -1 when no rejection
-    int64_t verification_us = 0;
+    int32_t rejected_at = -1; // internal sentinel; serialized as null when no rejection
+    int64_t verification_us = 0; // target decode + sampling/verification
+    std::string outcome = "not_attempted";
 };
 
 common_speculative_round_result common_speculative_run_round(
