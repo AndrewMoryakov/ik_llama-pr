@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Summarize Semantic Decoding JSON traces using only the Python stdlib."""
+"""Summarize IK_LLAMA_SPEC_TRACE NDJSON using only the Python stdlib."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import statistics
+from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def percentile(values: list[float], q: float) -> float | None:
@@ -23,58 +24,105 @@ def percentile(values: list[float], q: float) -> float | None:
     return xs[lo] * (1 - frac) + xs[hi] * frac
 
 
-def summarize(trace: dict[str, Any]) -> dict[str, Any]:
-    spec = [e for e in trace.get("events", []) if e.get("type") == "speculation"]
+def read_ndjson(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # A process killed during append can leave only the final line truncated.
+            if index == len(lines) - 1:
+                continue
+            raise
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
 
-    proposed = [int(e.get("proposed_tokens") or 0) for e in spec]
-    accepted = [int(e.get("accepted_tokens") or 0) for e in spec]
-    verify_ms = [
-        float(e["duration_ms"])
-        for e in spec
-        if e.get("duration_ms") is not None
+
+def summarize_rows(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    spec = [row for row in rows if row.get("type") == "speculation"]
+    verified = [
+        row for row in spec
+        if row.get("outcome") in {"partial_accept", "full_accept"}
+    ]
+    proposals = [row for row in spec if int(row.get("proposed_tokens") or 0) > 0]
+
+    proposed = [int(row.get("proposed_tokens") or 0) for row in proposals]
+    accepted = [int(row.get("accepted_tokens") or 0) for row in verified]
+    verification_ms = [
+        float(row.get("verification_total_us") or 0) / 1000.0 for row in verified
     ]
 
     total_proposed = sum(proposed)
-    total_accepted = sum(accepted)
+    total_accepted = sum(int(row.get("accepted_tokens") or 0) for row in verified)
+    outcomes = Counter(str(row.get("outcome") or "unknown") for row in spec)
 
-    by_proposer: dict[str, dict[str, int]] = {}
-    for e in spec:
-        name = str(e.get("proposer") or "unknown")
-        row = by_proposer.setdefault(
-            name, {"cycles": 0, "proposed_tokens": 0, "accepted_tokens": 0}
+    by_proposer: dict[str, dict[str, Any]] = {}
+    for row in spec:
+        name = str(row.get("proposer") or "unknown")
+        item = by_proposer.setdefault(
+            name,
+            {
+                "attempts": 0,
+                "proposals": 0,
+                "verified_rounds": 0,
+                "proposed_tokens": 0,
+                "accepted_tokens": 0,
+                "outcomes": {},
+            },
         )
-        row["cycles"] += 1
-        row["proposed_tokens"] += int(e.get("proposed_tokens") or 0)
-        row["accepted_tokens"] += int(e.get("accepted_tokens") or 0)
+        item["attempts"] += 1
+        n_proposed = int(row.get("proposed_tokens") or 0)
+        n_accepted = int(row.get("accepted_tokens") or 0)
+        if n_proposed > 0:
+            item["proposals"] += 1
+            item["proposed_tokens"] += n_proposed
+        if row.get("outcome") in {"partial_accept", "full_accept"}:
+            item["verified_rounds"] += 1
+            item["accepted_tokens"] += n_accepted
+        outcome = str(row.get("outcome") or "unknown")
+        item["outcomes"][outcome] = int(item["outcomes"].get(outcome, 0)) + 1
 
-    for row in by_proposer.values():
-        p = row["proposed_tokens"]
-        row["acceptance_rate"] = (row["accepted_tokens"] / p) if p else 0.0
+    for item in by_proposer.values():
+        attempts = int(item["attempts"])
+        proposed_tokens = int(item["proposed_tokens"])
+        item["proposal_coverage"] = (
+            int(item["proposals"]) / attempts if attempts else 0.0
+        )
+        item["acceptance_rate"] = (
+            int(item["accepted_tokens"]) / proposed_tokens if proposed_tokens else 0.0
+        )
 
-    summary = trace.get("summary", {})
     return {
-        "schema_version": trace.get("schema_version"),
-        "task_id": trace.get("run", {}).get("task_id"),
-        "mode": trace.get("run", {}).get("mode"),
-        "result": summary.get("result"),
-        "wall_time_ms": summary.get("wall_time_ms"),
-        "generated_tokens": summary.get("generated_tokens"),
-        "target_eval_count": summary.get("target_eval_count"),
-        "speculation_cycles": len(spec),
+        "schema_version": 1,
+        "records": len(spec),
+        "verified_rounds": len(verified),
+        "proposal_rounds": len(proposals),
+        "proposal_coverage": len(proposals) / len(spec) if spec else 0.0,
         "proposed_tokens": total_proposed,
         "accepted_tokens": total_accepted,
-        "acceptance_rate": (
-            total_accepted / total_proposed if total_proposed else 0.0
-        ),
-        "accepted_per_cycle_mean": (
+        "acceptance_rate": total_accepted / total_proposed if total_proposed else 0.0,
+        "accepted_per_verified_round_mean": (
             statistics.fmean(accepted) if accepted else 0.0
         ),
-        "accepted_per_cycle_p50": percentile([float(v) for v in accepted], 0.50),
-        "accepted_per_cycle_p95": percentile([float(v) for v in accepted], 0.95),
-        "verification_ms_p50": percentile(verify_ms, 0.50),
-        "verification_ms_p95": percentile(verify_ms, 0.95),
+        "accepted_per_verified_round_p50": percentile(
+            [float(v) for v in accepted], 0.50
+        ),
+        "accepted_per_verified_round_p95": percentile(
+            [float(v) for v in accepted], 0.95
+        ),
+        "verification_total_ms_p50": percentile(verification_ms, 0.50),
+        "verification_total_ms_p95": percentile(verification_ms, 0.95),
+        "outcomes": dict(sorted(outcomes.items())),
         "by_proposer": by_proposer,
     }
+
+
+def summarize_file(path: Path) -> dict[str, Any]:
+    return summarize_rows(read_ndjson(path))
 
 
 def main() -> None:
@@ -83,8 +131,7 @@ def main() -> None:
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
-    data = json.loads(args.trace.read_text(encoding="utf-8"))
-    output = summarize(data)
+    output = summarize_file(args.trace)
     print(json.dumps(output, indent=2 if args.pretty else None, sort_keys=True))
 
 
