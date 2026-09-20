@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ik-llama.local/semantic-decoding/trace.schema.json",
+  "title": "Semantic Decoding Trace",
+  "type": "object",
+  "required": ["schema_version", "run", "events", "summary"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "required": ["task_id", "mode"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "mode": { "type": "string" },
+        "git_commit": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "quantization": { "type": ["string", "null"] },
+        "seed": { "type": ["integer", "null"] },
+        "host": { "type": ["string", "null"] },
+        "config": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "ts_ms"],
+        "properties": {
+          "type": {
+            "enum": [
+              "target_eval",
+              "speculation",
+              "tool",
+              "reasoning",
+              "action",
+              "quality"
+            ]
+          },
+          "ts_ms": { "type": "number", "minimum": 0 },
+          "proposer": { "type": ["string", "null"] },
+          "proposed_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "accepted_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "rejected_at": { "type": ["integer", "null"], "minimum": 0 },
+          "duration_ms": { "type": ["number", "null"], "minimum": 0 },
+          "target_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "details": { "type": "object" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["result"],
+      "properties": {
+        "result": { "enum": ["pass", "fail", "indeterminate"] },
+        "wall_time_ms": { "type": ["number", "null"], "minimum": 0 },
+        "generated_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "target_eval_count": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
