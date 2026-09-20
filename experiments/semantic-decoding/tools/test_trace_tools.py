@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from run_matrix import aggregate_performance, rotated_orders
+from run_matrix import aggregate_performance, planned_commands, render_report, rotated_orders
 from summarize_trace import read_ndjson, summarize_rows
 
 
@@ -76,6 +76,50 @@ class TraceToolsTests(unittest.TestCase):
                 ["ngram-mod", "baseline", "suffix"],
             ],
         )
+
+
+    def test_planned_commands_preserve_space_bearing_paths(self) -> None:
+        base = [
+            r"O:\\user files\\build\\llama-server.exe",
+            "-m",
+            r"O:\\user files\\Models\\qwen.gguf",
+        ]
+        plan = planned_commands(base, ["baseline", "suffix"], 18080)
+        self.assertEqual(plan["baseline"][0], base[0])
+        self.assertEqual(plan["baseline"][2], base[2])
+        self.assertEqual(plan["suffix"][0], base[0])
+        self.assertIn("suffix:n_max=16,n_min=2", plan["suffix"][-1])
+
+    def test_report_contains_speedup_and_equivalence(self) -> None:
+        summary = {
+            "git_commit": "abc",
+            "model": "model.gguf",
+            "threads": 16,
+            "ctx_size": 8192,
+            "repeats": 3,
+            "modes": ["baseline", "suffix"],
+            "performance": {
+                "aggregate": {
+                    "baseline": {
+                        "request_s_median": 10.0,
+                        "request_s_min": 9.5,
+                        "request_s_max": 10.5,
+                        "output_equal_to_baseline": True,
+                    },
+                    "suffix": {
+                        "request_s_median": 5.0,
+                        "request_s_min": 4.8,
+                        "request_s_max": 5.2,
+                        "output_equal_to_baseline": True,
+                    },
+                }
+            },
+            "trace": [],
+        }
+        report = render_report(summary)
+        self.assertIn("2.000x", report)
+        self.assertIn("| suffix | 5.000", report)
+        self.assertIn("| yes |", report)
 
     def test_output_equivalence_uses_baseline_hash(self) -> None:
         rows = [
