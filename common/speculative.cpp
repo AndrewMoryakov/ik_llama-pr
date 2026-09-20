@@ -3473,6 +3473,8 @@ common_speculative_round_result common_speculative_run_round(
         &sparams);
     auto & draft = draft_result.tokens;
     auto & proposal_dists = draft_result.proposal_dists;
+    result.proposer = draft_result.type;
+    result.proposed_tokens = (int32_t) draft.size();
     const int min_usable_draft = params.get_min_usable_stage_n_min();
     if ((int) draft.size() < min_usable_draft || (draft.empty() && !draft_result.target_only)) {
         return result;
@@ -3515,7 +3517,9 @@ common_speculative_round_result common_speculative_run_round(
         verify_indices.push_back((int) i + 1);
     }
 
+    const int64_t verification_start_us = ggml_time_us();
     if (llama_decode(ctx, verify_batch) != 0) {
+        result.verification_us = ggml_time_us() - verification_start_us;
         llama_batch_free(verify_batch);
         result.failed = true;
         result.error = "speculative verify decode failed";
@@ -3527,10 +3531,16 @@ common_speculative_round_result common_speculative_run_round(
             ? common_sampler_sample_and_accept_n(sampler, ctx, verify_indices, draft)
             : common_sampler_sample_and_accept_n(sampler, ctx, verify_indices, draft, proposal_dists);
     } catch (const std::exception & e) {
+        result.verification_us = ggml_time_us() - verification_start_us;
         llama_batch_free(verify_batch);
         result.failed = true;
         result.error = e.what();
         return result;
+    }
+    result.verification_us = ggml_time_us() - verification_start_us;
+    result.accepted_tokens = std::max<int32_t>(0, (int32_t) ids.size() - 1);
+    if (result.accepted_tokens < result.proposed_tokens) {
+        result.rejected_at = result.accepted_tokens;
     }
 
     std::vector<int32_t> accepted_output_indices;
