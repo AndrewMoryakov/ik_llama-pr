@@ -287,6 +287,14 @@ struct common_speculative_round_result {
     std::string error;
     llama_token sampled_before = LLAMA_TOKEN_NULL;
     llama_tokens ids;
+
+    // Per-round observability. These fields are descriptive only and do not
+    // participate in sampling or verification decisions.
+    common_speculative_type proposer = COMMON_SPECULATIVE_TYPE_NONE;
+    int32_t proposed_tokens = 0;
+    int32_t accepted_tokens = 0;
+    int32_t rejected_at = -1; // zero-based draft position, -1 when no rejection
+    int64_t verification_us = 0;
 };
 
 common_speculative_round_result common_speculative_run_round(
