@@ -14,10 +14,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 
@@ -3398,6 +3400,47 @@ int32_t mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch
     return ret;
 }
 
+static void common_speculative_trace_round(
+        const common_speculative_round_result & result,
+        llama_seq_id seq_id,
+        llama_pos n_past) {
+    const char * trace_path = std::getenv("IK_LLAMA_SPEC_TRACE");
+    if (trace_path == nullptr || trace_path[0] == '\0') {
+        return;
+    }
+
+    static std::mutex trace_mutex;
+    std::lock_guard<std::mutex> lock(trace_mutex);
+
+    FILE * fp = std::fopen(trace_path, "ab");
+    if (fp == nullptr) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            LOG_WRN("%s: failed to open IK_LLAMA_SPEC_TRACE='%s'\n", __func__, trace_path);
+        }
+        return;
+    }
+
+    const std::string proposer = common_speculative_type_to_str(result.proposer);
+    std::fprintf(
+        fp,
+        "{\"schema_version\":1,\"type\":\"speculation\","
+        "\"seq_id\":%d,\"n_past\":%d,\"proposer\":\"%s\","
+        "\"proposed_tokens\":%d,\"accepted_tokens\":%d,"
+        "\"rejected_at\":%d,\"verification_us\":%lld,"
+        "\"used_speculative\":%s,\"failed\":%s}\n",
+        (int) seq_id,
+        (int) n_past,
+        proposer.c_str(),
+        result.proposed_tokens,
+        result.accepted_tokens,
+        result.rejected_at,
+        (long long) result.verification_us,
+        result.used_speculative ? "true" : "false",
+        result.failed ? "true" : "false");
+    std::fclose(fp);
+}
+
 common_speculative_round_result common_speculative_run_round(
         common_speculative * spec,
         llama_model * model,
@@ -3523,6 +3566,7 @@ common_speculative_round_result common_speculative_run_round(
         llama_batch_free(verify_batch);
         result.failed = true;
         result.error = "speculative verify decode failed";
+        common_speculative_trace_round(result, seq_id, n_past);
         return result;
     }
     std::vector<llama_token> ids;
@@ -3535,6 +3579,7 @@ common_speculative_round_result common_speculative_run_round(
         llama_batch_free(verify_batch);
         result.failed = true;
         result.error = e.what();
+        common_speculative_trace_round(result, seq_id, n_past);
         return result;
     }
     result.verification_us = ggml_time_us() - verification_start_us;
@@ -3564,5 +3609,6 @@ common_speculative_round_result common_speculative_run_round(
     }
 
     llama_batch_free(verify_batch);
+    common_speculative_trace_round(result, seq_id, n_past);
     return result;
 }
