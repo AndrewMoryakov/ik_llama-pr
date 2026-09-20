@@ -115,6 +115,30 @@ def build_base_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def validate_inputs(args: argparse.Namespace) -> None:
+    checks = (
+        ("server", args.server),
+        ("model", args.model),
+        ("prompt file", args.prompt_file),
+    )
+    for label, path in checks:
+        if not path.exists():
+            raise FileNotFoundError(f"{label} does not exist: {path}")
+        if not path.is_file():
+            raise ValueError(f"{label} is not a file: {path}")
+
+
+def planned_commands(
+    base_command: list[str],
+    modes: list[str],
+    port: int,
+) -> dict[str, list[str]]:
+    return {
+        mode: [*base_command, "--port", str(port + index), *DEFAULT_MODES[mode]]
+        for index, mode in enumerate(modes)
+    }
+
+
 def completion_payload(prompt: str, n_predict: int) -> dict[str, Any]:
     return {
         "prompt": prompt,
@@ -256,6 +280,78 @@ def aggregate_performance(
     return aggregate
 
 
+def format_seconds(value: Any) -> str:
+    return "-" if value is None else f"{float(value):.3f}"
+
+
+def render_report(summary: dict[str, Any]) -> str:
+    aggregate = summary["performance"]["aggregate"]
+    modes = summary["modes"]
+    baseline_s = aggregate.get("baseline", {}).get("request_s_median")
+
+    lines = [
+        "# Semantic Decoding Benchmark Report",
+        "",
+        f"- Commit: `{summary.get('git_commit') or 'unknown'}`",
+        f"- Model: `{summary.get('model')}`",
+        f"- Threads: `{summary.get('threads')}`",
+        f"- Context size: `{summary.get('ctx_size')}`",
+        f"- Repeats: `{summary.get('repeats')}`",
+        "",
+        "## Performance",
+        "",
+        "| Mode | Median request (s) | Min (s) | Max (s) | Speedup vs baseline | Output equal |",
+        "| --- | ---: | ---: | ---: | ---: | :---: |",
+    ]
+
+    for mode in modes:
+        row = aggregate.get(mode, {})
+        median_s = row.get("request_s_median")
+        if baseline_s and median_s:
+            speedup = f"{float(baseline_s) / float(median_s):.3f}x"
+        else:
+            speedup = "-"
+        equal = row.get("output_equal_to_baseline")
+        equal_text = "yes" if equal else ("no" if equal is False else "-")
+        lines.append(
+            f"| {mode} | {format_seconds(median_s)} | "
+            f"{format_seconds(row.get('request_s_min'))} | "
+            f"{format_seconds(row.get('request_s_max'))} | "
+            f"{speedup} | {equal_text} |"
+        )
+
+    trace_rows = summary.get("trace") or []
+    if trace_rows:
+        lines.extend([
+            "",
+            "## Trace diagnostics",
+            "",
+            "| Mode | Proposal coverage | Acceptance rate | Proposed | Accepted | Verified rounds |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for item in trace_rows:
+            trace = item.get("trace") or {}
+            lines.append(
+                f"| {item.get('mode')} | "
+                f"{float(trace.get('proposal_coverage') or 0):.3f} | "
+                f"{float(trace.get('acceptance_rate') or 0):.3f} | "
+                f"{int(trace.get('proposed_tokens') or 0)} | "
+                f"{int(trace.get('accepted_tokens') or 0)} | "
+                f"{int(trace.get('verified_rounds') or 0)} |"
+            )
+
+    lines.extend([
+        "",
+        "## Interpretation guardrails",
+        "",
+        "- Performance rows come from runs with trace I/O disabled.",
+        "- Exact output equality is a sanity check for greedy lossless decoding, not a substitute for task-level tests.",
+        "- Trace-pass timing should not be compared with headline performance timing.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", type=Path, required=True)
@@ -283,6 +379,11 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--trace-pass", action="store_true")
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs and print planned server commands without starting them.",
+    )
+    parser.add_argument(
         "--modes",
         nargs="+",
         choices=sorted(DEFAULT_MODES),
@@ -295,10 +396,21 @@ def main() -> int:
     if args.warmups < 0:
         parser.error("--warmups must be >= 0")
 
+    validate_inputs(args)
     prompt = args.prompt_file.read_text(encoding="utf-8")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     base_command = build_base_command(args)
     modes = list(args.modes)
+
+    if args.dry_run:
+        plan = {
+            "base_command": base_command,
+            "commands": planned_commands(base_command, modes, args.port),
+            "performance_trace_enabled": False,
+            "trace_pass_requested": args.trace_pass,
+        }
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        return 0
 
     warmup_results: list[dict[str, Any]] = []
     for warmup_index in range(args.warmups):
@@ -370,6 +482,7 @@ def main() -> int:
         "repeats": args.repeats,
         "warmups": args.warmups,
         "modes": modes,
+        "warmup_runs": warmup_results,
         "performance": {
             "runs": performance_results,
             "aggregate": aggregate_performance(performance_results, modes),
@@ -382,7 +495,10 @@ def main() -> int:
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    report_path = args.output_dir / "REPORT.md"
+    report_path.write_text(render_report(summary), encoding="utf-8")
     print(f"wrote {summary_path}")
+    print(f"wrote {report_path}")
     return 0
 
 
