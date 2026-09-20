@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -262,6 +263,7 @@ def main() -> int:
     parser.add_argument("--prompt-file", type=Path, required=True)
     parser.add_argument("--threads", type=int)
     parser.add_argument("--ctx-size", type=int)
+    parser.add_argument("--host-label")
     parser.add_argument(
         "--server-arg",
         action="append",
@@ -356,7 +358,9 @@ def main() -> int:
 
     summary = {
         "schema_version": 2,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit(),
+        "host_label": args.host_label,
         "server": str(args.server),
         "model": str(args.model),
         "prompt_file": str(args.prompt_file),
