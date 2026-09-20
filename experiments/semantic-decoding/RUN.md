@@ -6,7 +6,21 @@ The benchmark deliberately separates performance measurement from detailed traci
 
 Build `llama-server` normally from the `research/semantic-decoding` branch.
 
-## 2. Performance matrix
+## 2. Preflight
+
+Before loading a model, validate paths and inspect the exact argv that will be passed to each server process:
+
+    python .\experiments\semantic-decoding\tools\run_matrix.py `
+      --server ".\build\bin\Release\llama-server.exe" `
+      --model "O:\user files\Models\qwen.gguf" `
+      --prompt-file ".\prompt.txt" `
+      --threads 16 `
+      --dry-run
+
+This is especially useful on Windows because paths with spaces remain individual argv entries instead of being re-parsed as a shell command string.
+
+## 3. Performance matrix
+
 
 PowerShell example:
 
@@ -38,9 +52,9 @@ The default matrix is:
 - ngram-mod;
 - suffix.
 
-The runner performs optional warmup processes first, then measured runs with tracing disabled. Mode order is rotated across repeats. `summary.json` reports median/min/max request latency and output hashes.
+The runner performs optional warmup processes first, then measured runs with tracing disabled. Mode order is rotated across repeats. `summary.json` reports median/min/max request latency and output hashes, and `REPORT.md` provides a human-readable comparison including speedup versus baseline.
 
-## 3. Optional traced pass
+## 4. Optional traced pass
 
 Add:
 
@@ -50,7 +64,7 @@ This performs a separate diagnostic run per mode with `IK_LLAMA_SPEC_TRACE` enab
 
 The trace is NDJSON: one independently parseable event per line. A killed process may leave a truncated final line; the summarizer ignores only that final malformed line.
 
-## 4. Standalone trace sink
+## 5. Standalone trace sink
 
 PowerShell:
 
@@ -76,7 +90,7 @@ Summarize a trace with:
 
     python .\experiments\semantic-decoding\tools\summarize_trace.py spec.ndjson --pretty
 
-## 5. Self-tests
+## 6. Self-tests
 
     python .\experiments\semantic-decoding\tools\test_trace_tools.py
 
