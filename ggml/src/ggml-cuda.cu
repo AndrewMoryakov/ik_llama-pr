@@ -2767,12 +2767,21 @@ static __global__ void k_simple_gemm_T(int n, int nx, const src_t * x, const flo
 static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
         const ggml_cgraph * cgraph, int node_n) {
 
-    if ((src0->type == GGML_TYPE_F32 || ((src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16) && src0->ne[0] % 2 == 0)) &&
+    const bool split = src0->buffer && ggml_backend_buft_is_cuda_split(src0->buffer->buft);
+    if (!split &&
+         (src0->type == GGML_TYPE_F32 || ((src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16) && src0->ne[0] % 2 == 0)) &&
          src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
-         src0->ne[0] >= 1024 && src0->ne[2]*src0->ne[3] == 1 && src1->ne[2]*src1->ne[3] == 1 && src1->ne[1] <= 8) {
-        auto nsm = ggml_cuda_info().devices[ctx.device].nsm;
-        bool few_rows = src0->ne[1] * src1->ne[1] <= nsm;
-        if (few_rows || (src1->ne[1] == 1 && src0->type != GGML_TYPE_F32 && !(src0->buffer && ggml_backend_buft_is_cuda_split(src0->buffer->buft)))) {
+         src0->ne[0] >= 1024 && src0->ne[2]*src0->ne[3] == 1 && src1->ne[2]*src1->ne[3] == 1 && src1->ne[1] <= 8 &&
+         src0->nb[0] == ggml_type_size(src0->type) && src1->nb[0] == sizeof(float) && ggml_is_contiguous(dst)) {
+        const bool vectorized = src0->type != GGML_TYPE_F32;
+        const size_t align0 = src0->type == GGML_TYPE_F16 ? alignof(half2) :
+                              src0->type == GGML_TYPE_BF16 ? alignof(nv_bfloat162) : alignof(float);
+        const size_t align1 = vectorized ? alignof(float2) : alignof(float);
+        const bool aligned = (uintptr_t) src0->data % align0 == 0 && (uintptr_t) src1->data % align1 == 0 &&
+                             src0->nb[1] % align0 == 0 && src1->nb[1] % align1 == 0;
+        const auto nsm = ggml_cuda_info().devices[ctx.device].nsm;
+        const bool few_rows = src0->ne[1] * src1->ne[1] <= nsm;
+        if (aligned && (few_rows || (vectorized && src1->ne[1] == 1))) {
             int nth = few_rows ? 1024 : 256;
             dim3 grid(src0->ne[1], src1->ne[1], 1);
             if (src0->type == GGML_TYPE_F32) {

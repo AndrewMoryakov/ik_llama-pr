@@ -224,6 +224,10 @@ get_filename_component(TEST_TARGET test-c.c NAME_WE)
 add_executable(${TEST_TARGET} test-c.c)
 target_link_libraries(${TEST_TARGET} PRIVATE llama)
 
+add_executable(test-cuda-simple-gemm test-cuda-simple-gemm.cpp)
+target_link_libraries(test-cuda-simple-gemm PRIVATE ggml)
+add_test(NAME test-cuda-simple-gemm COMMAND $<TARGET_FILE:test-cuda-simple-gemm>)
+
 add_executable(test-moe-cache-shares test-moe-cache-shares.cpp)
 target_link_libraries(test-moe-cache-shares PRIVATE llama)
 target_include_directories(test-moe-cache-shares PRIVATE
