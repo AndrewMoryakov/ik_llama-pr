@@ -451,11 +451,6 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         LLAMA_LOG_INFO("%s: additional %d GGUFs metadata loaded.\n",  __func__, n_split - 1);
     }
 
-
-    if (import_nvfp4(nvfp4_precision)) {
-        use_mmap = false;
-    }
-  
     if (gguf_ngram) {
         LLAMA_LOG_INFO("%s: n-gram file %s: %d tensors, added to the model\n", __func__,
                 ngram_fname.c_str(), gguf_get_n_tensors(gguf_ngram));
@@ -468,25 +463,29 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         gguf_free(gguf_ngram);
     }
 
-    n_kv      = gguf_get_n_kv(meta);
-    n_tensors = weights.size();
-
-    fver = (enum llama_fver) gguf_get_version(meta);
-
     std::set<std::string> tensor_names;
-    for (auto & w : weights) {
-        n_elements += ggml_nelements(w.tensor);
-        n_bytes    += ggml_nbytes(w.tensor);
+    for (const auto & w : weights) {
         // make sure there is no duplicated tensor names
         const std::string name(w.tensor->name);
-        auto found = tensor_names.find(name);
-        if (found != tensor_names.end()) {
+        if (!tensor_names.insert(name).second) {
             if (w.idx == ngram_file_idx) {
                 throw std::runtime_error(format("tensor '%s' is in both the model and the n-gram file %s", w.tensor->name, ngram_fname.c_str()));
             }
             throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", w.tensor->name));
         }
-        tensor_names.insert(name);
+    }
+
+    if (import_nvfp4(nvfp4_precision)) {
+        use_mmap = false;
+    }
+
+    n_kv      = gguf_get_n_kv(meta);
+    n_tensors = weights.size();
+    fver      = (enum llama_fver) gguf_get_version(meta);
+
+    for (const auto & w : weights) {
+        n_elements += ggml_nelements(w.tensor);
+        n_bytes    += ggml_nbytes(w.tensor);
     }
 
     LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
